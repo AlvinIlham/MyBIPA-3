@@ -1,0 +1,8 @@
+{
+  "name": "mybipa-b1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node buat-admin-config.mjs"
+  }
+}

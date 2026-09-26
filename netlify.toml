@@ -1,0 +1,3 @@
+[build]
+  command = "node buat-admin-config.mjs"
+  publish = "."

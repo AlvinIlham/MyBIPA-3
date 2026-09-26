@@ -1,0 +1,4 @@
+{
+  "buildCommand": "node buat-admin-config.mjs",
+  "outputDirectory": "."
+}
