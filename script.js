@@ -2818,7 +2818,7 @@ const AKHIR = [
   var REGISTER = [];   // untuk mengunduh jawaban
 
   /* ---------- penyimpanan suntingan teks ---------- */
-  var KUNCI_SUNTING = KUNCI_SIMPAN + "-sunting";
+  var KUNCI_SUNTING = "mybipa-b1-sunting-global";
   var SUNTINGAN = {};
   try {
     var bawaan = window.__SUNTINGAN_AWAL || {};
@@ -2827,7 +2827,113 @@ const AKHIR = [
     for (var ks in simpanan) { if (Object.prototype.hasOwnProperty.call(simpanan, ks)) SUNTINGAN[ks] = simpanan[ks]; }
   } catch (e) { SUNTINGAN = window.__SUNTINGAN_AWAL || {}; }
   function simpanSuntingan() {
-    try { window.localStorage.setItem(KUNCI_SUNTING, JSON.stringify(SUNTINGAN)); } catch (e) { }
+    try {
+      /* Simpan ke cache lokal teks dan tautan URL ringan (Drive/YouTube),
+         TIDAK menyimpan berkas Base64 (data:) agar kuota localStorage tidak pernah habis */
+      var salinan = {};
+      for (var k in SUNTINGAN) {
+        if (k === "__FOTO__" || k === "__MEDIA__") {
+          var sub = SUNTINGAN[k];
+          if (sub && typeof sub === "object") {
+            var subBersih = {};
+            for (var sk in sub) {
+              if (typeof sub[sk] === "string" && !sub[sk].startsWith("data:")) {
+                subBersih[sk] = sub[sk];
+              }
+            }
+            salinan[k] = subBersih;
+          }
+        } else {
+          salinan[k] = SUNTINGAN[k];
+        }
+      }
+      window.localStorage.setItem(KUNCI_SUNTING, JSON.stringify(salinan));
+    } catch (e) { }
+  }
+
+  /* Terapkan seluruh suntingan ke elemen DOM bermarka data-sid */
+  function terapkanSuntingan() {
+    var elems = document.querySelectorAll("[data-sid]");
+    Array.prototype.forEach.call(elems, function (el) {
+      var sid = el.dataset.sid;
+      if (Object.prototype.hasOwnProperty.call(SUNTINGAN, sid) && SUNTINGAN[sid] !== undefined && SUNTINGAN[sid] !== null) {
+        el.innerHTML = SUNTINGAN[sid];
+      } else if (el.dataset.teksAsli !== undefined) {
+        el.innerHTML = el.dataset.teksAsli;
+      }
+    });
+  }
+
+  /* ---------- sinkron suntingan ke/dari Supabase ---------- */
+  var _timerSunting = null;
+
+  /* Ambil suntingan dari Supabase saat halaman dibuka - berlaku untuk SEMUA pengguna */
+  function supabaseAmbilSuntingan(selesai) {
+    if (!SUPABASE_URL) { if (selesai) selesai(); return; }
+    supabaseReq("suntingan?id=eq.b1-modul&select=data", "GET", null, function (ok, hasil) {
+      if (ok && hasil && hasil[0] && typeof hasil[0].data === "object" && hasil[0].data !== null) {
+        var dataCloud = hasil[0].data;
+        /* Supabase adalah sumber kebenaran utama; timpa cache lama */
+        SUNTINGAN = {};
+        var bawaan = window.__SUNTINGAN_AWAL || {};
+        for (var kb in bawaan) { if (Object.prototype.hasOwnProperty.call(bawaan, kb)) SUNTINGAN[kb] = bawaan[kb]; }
+        for (var k in dataCloud) {
+          if (Object.prototype.hasOwnProperty.call(dataCloud, k)) {
+            SUNTINGAN[k] = dataCloud[k];
+          }
+        }
+        if (dataCloud.__FOTO__ && typeof dataCloud.__FOTO__ === "object") {
+          FOTO_MODUL = dataCloud.__FOTO__;
+          terapkanSemuaFoto();
+        }
+        if (dataCloud.__MEDIA__ && typeof dataCloud.__MEDIA__ === "object") {
+          MEDIA_KUSTOM = dataCloud.__MEDIA__;
+          terapkanSemuaMedia();
+        }
+        simpanSuntingan();
+        terapkanSuntingan();
+      }
+      if (selesai) selesai();
+    });
+  }
+
+  /* Simpan suntingan ke Supabase SECARA LANGSUNG tanpa delay (untuk foto dan media) */
+  function supabaseSimpanSuntinganSegera(selesai) {
+    if (!SUPABASE_URL || !ADMIN) { if (selesai) selesai(false, "Supabase atau admin tidak aktif"); return; }
+    clearTimeout(_timerSunting);
+    var muatan = {
+      id: "b1-modul",
+      data: SUNTINGAN,
+      diperbarui: new Date().toISOString(),
+      diperbarui_oleh: AKUN ? (AKUN.surel || AKUN.nama || "admin") : "admin"
+    };
+    supabaseReq("suntingan", "POST", muatan, function (ok, res, err) {
+      if (!ok) { console.warn("[MyBIPA] Gagal simpan suntingan ke Supabase:", err); }
+      if (selesai) selesai(ok, err);
+    });
+  }
+
+  /* Simpan suntingan ke Supabase dengan debounce 1500ms (untuk ketikan teks) */
+  function supabaseSimpanSuntingan() {
+    if (!SUPABASE_URL || !ADMIN) return;
+    clearTimeout(_timerSunting);
+    _timerSunting = setTimeout(function () {
+      supabaseSimpanSuntinganSegera();
+    }, 1500);
+  }
+
+  /* Hapus suntingan dari Supabase - saat admin menekan 'Kembalikan teks asli' */
+  function supabaseHapusSuntingan(selesai) {
+    if (!SUPABASE_URL || !ADMIN) { if (selesai) selesai(); return; }
+    var muatan = {
+      id: "b1-modul",
+      data: {},
+      diperbarui: new Date().toISOString(),
+      diperbarui_oleh: AKUN ? (AKUN.surel || AKUN.nama || "admin") : "admin"
+    };
+    supabaseReq("suntingan", "POST", muatan, function () {
+      if (selesai) selesai();
+    });
   }
 
   /* ---------- alat bantu ---------- */
@@ -2846,11 +2952,151 @@ const AKHIR = [
   /* ---------- kemajuan ---------- */
   var POIN = {};   // idHalaman -> {total:n, selesai:{}}
   /* ================= PENILAIAN OTOMATIS ================= */
+  /* ---------- media & foto kustom tersinkron Supabase (TANPA LOCAL STORAGE) ---------- */
   var KUNCI_FOTO_MODUL = "mybipa-b1-foto-modul";
-  var FOTO_MODUL = bacaGudang(KUNCI_FOTO_MODUL, {});
-  function simpanFotoModul() {
-    if (!tulisGudang(KUNCI_FOTO_MODUL, FOTO_MODUL))
-      window.alert("Foto tampil sekarang, tetapi tidak dapat disimpan karena penyimpanan peramban penuh atau terblokir.");
+  var FOTO_MODUL = (SUNTINGAN && SUNTINGAN.__FOTO__) || {};
+  var KUNCI_MEDIA_KUSTOM = "mybipa-b1-media-kustom";
+  var MEDIA_KUSTOM = (SUNTINGAN && SUNTINGAN.__MEDIA__) || {};
+
+  /* Pastikan sisa foto/media lama dibersihkan dari localStorage agar kuota tidak terkuras */
+  try { window.localStorage.removeItem(KUNCI_FOTO_MODUL); } catch (e) { }
+  try { window.localStorage.removeItem(KUNCI_MEDIA_KUSTOM); } catch (e) { }
+
+  var DAFTAR_PEMASANG_FOTO = [];
+  function daftarkanPemasangFoto(kunci, fn) {
+    DAFTAR_PEMASANG_FOTO.push({ kunci: kunci, fn: fn });
+    if (FOTO_MODUL && FOTO_MODUL[kunci]) {
+      try { fn(FOTO_MODUL[kunci]); } catch (e) { }
+    }
+  }
+  function terapkanSemuaFoto() {
+    DAFTAR_PEMASANG_FOTO.forEach(function (p) {
+      try { p.fn(FOTO_MODUL[p.kunci] || ""); } catch (e) { }
+    });
+    if (FOTO_MODUL["sampul"] && document.getElementById("gambar-sampul")) {
+      pasangGambarAman(document.getElementById("gambar-sampul"), FOTO_MODUL["sampul"], SAMPUL_BAWAAN);
+      var ls = document.getElementById("latar-sampul");
+      if (ls) pasangGambarAman(ls, FOTO_MODUL["sampul"], SAMPUL_BAWAAN);
+    }
+  }
+
+  /* ---------- Pengurai Tautan Daring (Google Drive & YouTube) ---------- */
+  function ekstrakGoogleDriveId(url) {
+    if (!url || typeof url !== "string") return null;
+    var u = url.trim();
+    var m = u.match(/\/file\/d\/([a-zA-Z0-9_-]+)/i) ||
+            u.match(/[?&]id=([a-zA-Z0-9_-]+)/i) ||
+            u.match(/\/d\/([a-zA-Z0-9_-]+)/i);
+    return m ? m[1] : null;
+  }
+
+  function ekstrakYouTubeId(url) {
+    if (!url || typeof url !== "string") return null;
+    var u = url.trim();
+    var ytMatch = u.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|v\/|shorts\/))([\w-]{11})/i);
+    return (ytMatch && ytMatch[1]) ? ytMatch[1] : null;
+  }
+
+  /* Mengubah URL (termasuk link Google Drive) menjadi URL gambar langsung untuk tag <img> */
+  function ubahKeUrlGambar(url) {
+    if (!url || typeof url !== "string") return "";
+    var u = url.trim();
+    var gdId = ekstrakGoogleDriveId(u);
+    if (gdId) {
+      /* lh3.googleusercontent.com/d/ID adalah endpoint resmi Google yang melayani gambar tanpa blokir */
+      return "https://lh3.googleusercontent.com/d/" + gdId;
+    }
+    return u;
+  }
+
+  /* Memasang gambar dengan penanganan tautan daring Google Drive & fallback otomatis */
+  function pasangGambarAman(elImg, urlAsli, fallbackUrl) {
+    if (!elImg) return;
+    if (!urlAsli) {
+      if (fallbackUrl) { elImg.src = fallbackUrl; elImg.hidden = false; }
+      else { elImg.src = ""; elImg.hidden = true; }
+      return;
+    }
+    var urlOlahan = ubahKeUrlGambar(urlAsli);
+    elImg.src = urlOlahan;
+    elImg.hidden = false;
+
+    var gdId = ekstrakGoogleDriveId(urlAsli);
+    if (gdId) {
+      elImg.onerror = function () {
+        /* Jika endpoint lh3 dibatasi, coba thumbnail Google Drive */
+        if (elImg.src && elImg.src.indexOf("lh3.googleusercontent.com") !== -1) {
+          elImg.src = "https://drive.google.com/thumbnail?id=" + gdId + "&sz=w1600";
+        } else if (fallbackUrl && elImg.src !== fallbackUrl) {
+          elImg.src = fallbackUrl;
+        }
+      };
+    } else {
+      elImg.onerror = function () {
+        if (fallbackUrl && elImg.src !== fallbackUrl) {
+          elImg.src = fallbackUrl;
+        }
+      };
+    }
+  }
+
+  /* Periksa apakah URL adalah tautan YouTube atau Google Drive untuk Audio & Video */
+  function periksaVideoEmbed(url) {
+    if (!url || typeof url !== "string") return null;
+    var u = url.trim();
+    var ytId = ekstrakYouTubeId(u);
+    if (ytId) {
+      return {
+        tipe: "youtube",
+        id: ytId,
+        src: "https://www.youtube-nocookie.com/embed/" + ytId + "?rel=0"
+      };
+    }
+    var gdId = ekstrakGoogleDriveId(u);
+    if (gdId) {
+      return {
+        tipe: "drive",
+        id: gdId,
+        src: "https://drive.google.com/file/d/" + gdId + "/preview",
+        directUrl: "https://drive.google.com/uc?export=download&id=" + gdId
+      };
+    }
+    return null;
+  }
+
+  var DAFTAR_PEMASANG_MEDIA = [];
+  function daftarkanPemasangMedia(kode, fn) {
+    DAFTAR_PEMASANG_MEDIA.push({ kode: kode, fn: fn });
+    if (MEDIA_KUSTOM && MEDIA_KUSTOM[kode]) {
+      try { fn(MEDIA_KUSTOM[kode]); } catch (e) { }
+    }
+  }
+  function terapkanSemuaMedia() {
+    DAFTAR_PEMASANG_MEDIA.forEach(function (p) {
+      try { if (MEDIA_KUSTOM[p.kode]) p.fn(MEDIA_KUSTOM[p.kode]); } catch (e) { }
+    });
+    var vm = document.getElementById("video-mars");
+    if (MEDIA_KUSTOM["mars"] && vm) {
+      vm.src = MEDIA_KUSTOM["mars"];
+    }
+  }
+
+  /* Simpan foto ke Supabase TANPA local storage */
+  function simpanFotoModul(selesai) {
+    SUNTINGAN.__FOTO__ = FOTO_MODUL;
+    simpanSuntingan();
+    supabaseSimpanSuntinganSegera(function (ok, err) {
+      if (selesai) selesai(ok, err);
+    });
+  }
+
+  /* Simpan media ke Supabase TANPA local storage */
+  function simpanMediaKustom(selesai) {
+    SUNTINGAN.__MEDIA__ = MEDIA_KUSTOM;
+    simpanSuntingan();
+    supabaseSimpanSuntinganSegera(function (ok, err) {
+      if (selesai) selesai(ok, err);
+    });
   }
   function kecilkanGambar(berkas, sisiMaks, lanjut) {
     var pembaca = new FileReader();
@@ -3163,67 +3409,360 @@ const AKHIR = [
   }
   var SIAP_NILAI = false;
 
+  /* ---------- Pembangun Pemutar Audio Mewah Berbalut Emas Minangkabau ---------- */
+  function bangunPemutarAudioKustom(wadahPemutar) {
+    var bungkus = E("div", "pemutar-kustom");
+    var audio = document.createElement("audio");
+    audio.className = "audio-inti";
+    audio.preload = "metadata";
+    bungkus.appendChild(audio);
+
+    var baris = E("div", "pemutar-baris-utama");
+
+    // 1. Tombol Putar / Jeda
+    var btnPlay = E("button", "tbl-putar");
+    btnPlay.type = "button";
+    btnPlay.setAttribute("aria-label", "Putar audio");
+    btnPlay.innerHTML = '<svg class="ikon-play" viewBox="0 0 24 24"><polygon points="7,5 19,12 7,19"/></svg>' +
+      '<svg class="ikon-pause" viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>';
+
+    // 2. Tombol Lompat -5s & +5s
+    var btnMundur = E("button", "tbl-lompat mundur");
+    btnMundur.type = "button";
+    btnMundur.title = "Mundur 5 detik";
+    btnMundur.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12.5 8c-2.65 0-5.05 1-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.2 3.16-1.98 5.12-1.98 3.89 0 7.14 2.78 7.82 6.43l2.43-.5C21.84 12.16 17.65 8 12.5 8z" fill="currentColor"/><text x="12" y="16" font-size="7" font-weight="bold" text-anchor="middle" fill="currentColor">5</text></svg>';
+
+    var btnMaju = E("button", "tbl-lompat maju");
+    btnMaju.type = "button";
+    btnMaju.title = "Maju 5 detik";
+    btnMaju.innerHTML = '<svg viewBox="0 0 24 24"><path d="M11.5 8c2.65 0 5.05 1 6.9 2.6L22 7v9h-9l3.62-3.62c-1.39-1.2-3.16-1.98-5.12-1.98-3.89 0-7.14 2.78-7.82 6.43l-2.43-.5C2.16 12.16 6.35 8 11.5 8z" fill="currentColor"/><text x="12" y="16" font-size="7" font-weight="bold" text-anchor="middle" fill="currentColor">5</text></svg>';
+
+    // 3. Linimasa Waktu & Rel Kemajuan
+    var linimasa = E("div", "pemutar-linimasa");
+    var relWaktu = E("div", "pemutar-rel-waktu");
+    var teksKini = E("span", "waktu-kini", "00:00");
+    var rel = E("div", "rel-kemajuan");
+    var relIsi = E("div", "rel-isi");
+    var relPegangan = E("div", "rel-pegangan");
+    relIsi.appendChild(relPegangan);
+    rel.appendChild(relIsi);
+    var teksTotal = E("span", "waktu-total", "00:00");
+
+    relWaktu.appendChild(teksKini);
+    relWaktu.appendChild(rel);
+    relWaktu.appendChild(teksTotal);
+    linimasa.appendChild(relWaktu);
+
+    // 4. Tombol Kecepatan
+    var daftarKec = [1, 1.25, 1.5, 0.75];
+    var idxKec = 0;
+    var btnKec = E("button", "tbl-kecepatan", "1x");
+    btnKec.type = "button";
+    btnKec.title = "Atur kecepatan putar (bagus untuk latihan menyimak)";
+
+    // 5. Volume
+    var wadahVol = E("div", "wadah-volume");
+    var btnVol = E("button", "tbl-volume");
+    btnVol.type = "button";
+    btnVol.title = "Bisukan / Bunyikan";
+    btnVol.innerHTML = '<svg class="ikon-vol" viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z" fill="currentColor"/></svg>';
+    var sliderVol = document.createElement("input");
+    sliderVol.type = "range";
+    sliderVol.className = "slider-volume";
+    sliderVol.min = "0"; sliderVol.max = "1"; sliderVol.step = "0.05"; sliderVol.value = "1";
+    wadahVol.appendChild(btnVol);
+    wadahVol.appendChild(sliderVol);
+
+    baris.appendChild(btnPlay);
+    baris.appendChild(btnMundur);
+    baris.appendChild(btnMaju);
+    baris.appendChild(linimasa);
+    baris.appendChild(btnKec);
+    baris.appendChild(wadahVol);
+    bungkus.appendChild(baris);
+
+    // 6. Animasi Gelombang Suara
+    var gelombang = E("div", "efek-gelombang");
+    for (var g = 0; g < 8; g++) gelombang.appendChild(document.createElement("span"));
+    bungkus.appendChild(gelombang);
+
+    function formatWaktu(dtk) {
+      if (isNaN(dtk) || dtk < 0) return "00:00";
+      var m = Math.floor(dtk / 60);
+      var s = Math.floor(dtk % 60);
+      return (m < 10 ? "0" + m : m) + ":" + (s < 10 ? "0" + s : s);
+    }
+
+    btnPlay.addEventListener("click", function () {
+      if (audio.paused) {
+        document.querySelectorAll("audio").forEach(function (a) {
+          if (a !== audio) try { a.pause(); } catch (e) { }
+        });
+        audio.play().catch(function () { });
+      } else {
+        audio.pause();
+      }
+    });
+
+    audio.addEventListener("play", function () { bungkus.classList.add("memutar"); });
+    audio.addEventListener("pause", function () { bungkus.classList.remove("memutar"); });
+    audio.addEventListener("ended", function () {
+      bungkus.classList.remove("memutar");
+      relIsi.style.width = "0%";
+      teksKini.textContent = "00:00";
+    });
+
+    audio.addEventListener("timeupdate", function () {
+      if (!audio.duration) return;
+      var persen = (audio.currentTime / audio.duration) * 100;
+      relIsi.style.width = persen + "%";
+      teksKini.textContent = formatWaktu(audio.currentTime);
+    });
+
+    audio.addEventListener("loadedmetadata", function () {
+      teksTotal.textContent = formatWaktu(audio.duration);
+    });
+
+    function lompatWaktu(ev) {
+      var rect = rel.getBoundingClientRect();
+      var x = Math.max(0, Math.min(ev.clientX - rect.left, rect.width));
+      var targetPersen = x / rect.width;
+      if (audio.duration) {
+        audio.currentTime = targetPersen * audio.duration;
+      }
+    }
+    rel.addEventListener("click", lompatWaktu);
+
+    btnMundur.addEventListener("click", function () {
+      audio.currentTime = Math.max(0, audio.currentTime - 5);
+    });
+    btnMaju.addEventListener("click", function () {
+      if (audio.duration) audio.currentTime = Math.min(audio.duration, audio.currentTime + 5);
+    });
+
+    btnKec.addEventListener("click", function () {
+      idxKec = (idxKec + 1) % daftarKec.length;
+      var kec = daftarKec[idxKec];
+      audio.playbackRate = kec;
+      btnKec.textContent = kec + "x";
+    });
+
+    sliderVol.addEventListener("input", function () {
+      audio.volume = parseFloat(sliderVol.value);
+      audio.muted = (audio.volume === 0);
+    });
+    btnVol.addEventListener("click", function () {
+      audio.muted = !audio.muted;
+      sliderVol.value = audio.muted ? 0 : audio.volume;
+    });
+
+    wadahPemutar.appendChild(bungkus);
+
+    return {
+      audio: audio,
+      bungkus: bungkus,
+      setSumber: function (url, fallbackEmbedUrl) {
+        audio.src = url;
+        audio.load();
+        if (fallbackEmbedUrl) {
+          audio.onerror = function () {
+            // Jika direct stream dibatasi, beralih ke preview iframe
+            bungkus.style.display = "none";
+            var ifrFallback = wadahPemutar.querySelector("iframe.media-embed");
+            if (!ifrFallback) {
+              ifrFallback = document.createElement("iframe");
+              ifrFallback.className = "audio-embed media-embed";
+              ifrFallback.setAttribute("allowfullscreen", "");
+              ifrFallback.setAttribute("allow", "autoplay");
+              wadahPemutar.appendChild(ifrFallback);
+            }
+            ifrFallback.src = fallbackEmbedUrl;
+            ifrFallback.style.display = "block";
+          };
+        }
+      }
+    };
+  }
+
   /* ---------- kotak media ---------- */
   function buatMedia(b, hal) {
     var jenisVideo = (b.j === "video");
     var kotak = E("div", "media");
-    var alamat = MEDIA[b.kode] || ("media/" + b.kode + (jenisVideo ? ".mp4" : ".mp3"));
+    var alamat = (MEDIA_KUSTOM && MEDIA_KUSTOM[b.kode]) || MEDIA[b.kode] || ("media/" + b.kode + (jenisVideo ? ".mp4" : ".mp3"));
     kotak.innerHTML =
-      '<div class="kop"><span class="kode">' + (jenisVideo ? "VIDEO" : "AUDIO") + " · " + b.kode.toUpperCase() +
-      '</span><span class="durasi">' + (b.durasi || "") + "</span></div>" +
+      '<div class="kop"><span class="kode">' + (jenisVideo ? '<svg class="media-ikon-tipe" viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg> VIDEO' : '<svg class="media-ikon-tipe" viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg> AUDIO') + " · " + b.kode.toUpperCase() +
+      '</span>' + (b.durasi ? '<span class="durasi">⏱ ' + b.durasi + '</span>' : '') + '</div>' +
       "<h4>" + b.judul + "</h4>" +
-      (b.ket ? "<p>" + b.ket + "</p>" : "");
-    var pemutar = document.createElement(jenisVideo ? "video" : "audio");
-    pemutar.controls = true; pemutar.preload = "none";
-    if (jenisVideo) pemutar.setAttribute("playsinline", "");
-    pemutar.src = alamat;
-    kotak.appendChild(pemutar);
+      (b.ket ? '<p class="media-petunjuk">' + b.ket + "</p>" : "");
+
+    var wadahPemutar = E("div", "wadah-pemutar");
+    var pemutarVideo = null;
+    var pemutarAudioKustom = null;
+
+    if (jenisVideo) {
+      pemutarVideo = document.createElement("video");
+      pemutarVideo.controls = true;
+      pemutarVideo.preload = "none";
+      pemutarVideo.setAttribute("playsinline", "");
+      wadahPemutar.appendChild(pemutarVideo);
+    } else {
+      pemutarAudioKustom = bangunPemutarAudioKustom(wadahPemutar);
+    }
+    kotak.appendChild(wadahPemutar);
 
     var kaki = E("div", "kaki");
-    var tombol = E("button", "tbl-kecil", jenisVideo ? "Pilih berkas video" : "Pilih berkas audio");
-    tombol.type = "button";
-    var nama = E("span", "berkas", alamat);
-    tombol.addEventListener("click", function () {
-      var inp = document.createElement("input");
-      inp.type = "file";
-      inp.accept = jenisVideo ? "video/*" : "audio/*";
-      inp.addEventListener("change", function () {
-        var berkas = inp.files && inp.files[0];
-        if (!berkas) return;
-        pemutar.src = URL.createObjectURL(berkas);
-        pemutar.load();
-        nama.textContent = berkas.name + " · dimuat dari perangkat ini";
-        nama.style.color = "#D9A441";
-      });
-      inp.click();
-    });
-    var sudahCadangan = false;
-    pemutar.addEventListener("error", function () {
-      if (pemutar.src.indexOf("blob:") === 0) return;
-      if (!sudahCadangan && AUDIO_BAWAAN[b.kode]) {
-        sudahCadangan = true;
-        pemutar.src = AUDIO_BAWAAN[b.kode];
-        pemutar.load();
-        var coba = pemutar.play();
-        if (coba && coba.catch) coba.catch(function () { });
-        nama.textContent = "rekaman latihan sementara · suara sintetis bawaan modul";
-        nama.style.color = "#D9A441";
-        return;
+    var nama = E("span", "badge-status");
+
+    function pasangSumberMedia(url) {
+      var embed = periksaVideoEmbed(url);
+
+      if (jenisVideo) {
+        /* PENGELOLAAN VIDEO */
+        if (embed) {
+          if (pemutarVideo) {
+            pemutarVideo.style.display = "none";
+            pemutarVideo.removeAttribute("src");
+            try { pemutarVideo.pause(); } catch (e) { }
+          }
+          var ifrV = wadahPemutar.querySelector("iframe.video-embed");
+          if (!ifrV) {
+            ifrV = document.createElement("iframe");
+            ifrV.className = "video-embed media-embed";
+            ifrV.setAttribute("allowfullscreen", "");
+            ifrV.setAttribute("allow", "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share");
+            wadahPemutar.appendChild(ifrV);
+          }
+          ifrV.src = embed.src;
+          ifrV.style.display = "block";
+          nama.innerHTML = '<span class="titik"></span> ' + (embed.tipe === "youtube" ? "YouTube" : "Google Drive");
+        } else {
+          var ifrSisaV = wadahPemutar.querySelector("iframe.video-embed");
+          if (ifrSisaV) { ifrSisaV.src = ""; ifrSisaV.style.display = "none"; }
+          if (pemutarVideo) {
+            pemutarVideo.style.display = "block";
+            pemutarVideo.src = url;
+            pemutarVideo.load();
+          }
+          nama.innerHTML = (MEDIA_KUSTOM && MEDIA_KUSTOM[b.kode]) ?
+            '<span class="titik"></span> Video Kustom' :
+            '<span class="titik" style="background:#d9a441;box-shadow:0 0 6px #d9a441"></span> Video Bawaan';
+        }
+      } else {
+        /* PENGELOLAAN AUDIO (PEMUTAR MEWAH EMAS) */
+        var ifrAudio = wadahPemutar.querySelector("iframe.media-embed");
+        if (ifrAudio) { ifrAudio.src = ""; ifrAudio.style.display = "none"; }
+
+        if (embed && embed.tipe === "youtube") {
+          // YouTube Audio: tampilkan iframe player
+          if (pemutarAudioKustom) pemutarAudioKustom.bungkus.style.display = "none";
+          var ifrYt = wadahPemutar.querySelector("iframe.media-embed");
+          if (!ifrYt) {
+            ifrYt = document.createElement("iframe");
+            ifrYt.className = "video-embed media-embed";
+            ifrYt.setAttribute("allowfullscreen", "");
+            ifrYt.setAttribute("allow", "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share");
+            wadahPemutar.appendChild(ifrYt);
+          }
+          ifrYt.src = embed.src;
+          ifrYt.style.display = "block";
+          nama.innerHTML = '<span class="titik"></span> YouTube';
+
+        } else if (embed && embed.tipe === "drive") {
+          // Google Drive Audio: Putar langsung di Pemutar Kustom Mewah via stream resmi
+          if (pemutarAudioKustom) {
+            pemutarAudioKustom.bungkus.style.display = "block";
+            var streamUrl = "https://drive.usercontent.google.com/download?id=" + embed.id + "&export=download";
+            pemutarAudioKustom.setSumber(streamUrl, embed.src);
+          }
+          nama.innerHTML = '<span class="titik"></span> Google Drive';
+
+        } else {
+          // Berkas audio langsung (MP3 daring atau berkas bawaan)
+          if (pemutarAudioKustom) {
+            pemutarAudioKustom.bungkus.style.display = "block";
+            pemutarAudioKustom.setSumber(url);
+          }
+          nama.innerHTML = (MEDIA_KUSTOM && MEDIA_KUSTOM[b.kode]) ?
+            '<span class="titik"></span> Audio Kustom' :
+            '<span class="titik" style="background:#d9a441;box-shadow:0 0 6px #d9a441"></span> Berkas Bawaan';
+        }
       }
-      nama.textContent = alamat + " · berkas belum tersedia, gunakan tombol di samping";
-    });
-    if (AUDIO_BAWAAN[b.kode]) {
-      kotak.classList.add("ada-cadangan");
-      var tandaC = E("span", "tanda-cadangan", "● rekaman sementara tersedia");
-      kotak.querySelector(".kop").appendChild(tandaC);
+
+      if (btnReset) {
+        btnReset.style.display = (MEDIA_KUSTOM && MEDIA_KUSTOM[b.kode]) ? "inline-flex" : "none";
+      }
     }
-    if (ADMIN) kaki.appendChild(tombol);
+
+    var btnLink = null;
+    var btnReset = null;
+
+    if (ADMIN) {
+      var grupAdmin = E("div", "grup-tombol-admin");
+
+      btnLink = E("button", "tbl-admin-link", jenisVideo ? "🔗 Ganti Video (Drive / YouTube)" : "🔗 Ganti Audio (Drive / YouTube)");
+      btnLink.type = "button";
+      btnLink.title = "Atur tautan Google Drive atau YouTube";
+      btnLink.addEventListener("click", function () {
+        var skrg = MEDIA_KUSTOM[b.kode] || alamat;
+        var pesan = "ATUR TAUTAN " + (jenisVideo ? "VIDEO" : "AUDIO") + " (" + b.kode.toUpperCase() + "):\n\n" +
+          "• Tautan YouTube (contoh: https://www.youtube.com/watch?v=... atau https://youtu.be/...)\n" +
+          "• Tautan Google Drive (contoh: https://drive.google.com/file/d/.../view)\n" +
+          "• Atau tautan berkas daring langsung (.mp3 / .mp4)\n\n" +
+          "Catatan: Disimpan secara online ke basis data Supabase (bebas kuota localStorage).\n\n" +
+          "Tautan saat ini: " + skrg;
+        var masukkan = window.prompt(pesan, (MEDIA_KUSTOM[b.kode] || ""));
+        if (masukkan === null) return;
+        var teks = masukkan.trim();
+        if (teks) {
+          MEDIA_KUSTOM[b.kode] = teks;
+          pasangSumberMedia(teks);
+          simpanMediaKustom(function (ok, err) {
+            if (ok) {
+              window.alert((jenisVideo ? "Tautan video" : "Tautan audio") + " berhasil disimpan ke Supabase!");
+            } else {
+              window.alert("Gagal menyimpan ke Supabase: " + (err || "error"));
+            }
+          });
+        }
+      });
+
+      btnReset = E("button", "tbl-admin-reset", "↺ Bawaan");
+      btnReset.type = "button";
+      btnReset.title = "Hapus media kustom dan kembali ke berkas awal";
+      btnReset.style.display = (MEDIA_KUSTOM && MEDIA_KUSTOM[b.kode]) ? "inline-flex" : "none";
+      btnReset.addEventListener("click", function () {
+        if (window.confirm("Hapus media kustom dan kembalikan ke berkas bawaan?")) {
+          delete MEDIA_KUSTOM[b.kode];
+          var asal = MEDIA[b.kode] || ("media/" + b.kode + (jenisVideo ? ".mp4" : ".mp3"));
+          pasangSumberMedia(asal);
+          simpanMediaKustom(function () {
+            window.alert("Media dikembalikan ke berkas bawaan modul.");
+          });
+        }
+      });
+
+      grupAdmin.appendChild(btnLink);
+      grupAdmin.appendChild(btnReset);
+      kaki.appendChild(grupAdmin);
+    }
+
     kaki.appendChild(nama);
     kotak.appendChild(kaki);
+
+    /* Pasang sumber awal dan daftarkan pembaruan otomatis saat data Supabase tiba */
+    pasangSumberMedia(alamat);
+    daftarkanPemasangMedia(b.kode, function (urlBaru) {
+      pasangSumberMedia(urlBaru);
+    });
+
     kotak.appendChild(E("div", "cetak-saja",
       (jenisVideo ? "VIDEO" : "AUDIO") + " — " + alamat + (b.durasi ? " (" + b.durasi + ")" : "") + ". Putar dari perangkat pengajar."));
     return kotak;
   }
+
+
+
+
 
   /* ---------- latihan: pilihan ganda ---------- */
   function buatPantau() {
@@ -3980,27 +4519,50 @@ const AKHIR = [
     kotak.appendChild(gbr); kotak.appendChild(kosong);
 
     function pasang(data) {
-      if (data) { gbr.src = data; gbr.hidden = false; kosong.style.display = "none"; }
+      if (data) { pasangGambarAman(gbr, data); gbr.hidden = false; kosong.style.display = "none"; }
       else { gbr.hidden = true; kosong.style.display = ""; }
     }
     pasang(FOTO_MODUL[kunci]);
+    daftarkanPemasangFoto(kunci, pasang);
 
     if (ADMIN) {
-      var tb = E("button", "fd-unggah", "Unggah gambar");
-      tb.type = "button";
-      tb.addEventListener("click", function () {
-        var inp = document.createElement("input");
-        inp.type = "file"; inp.accept = "image/*";
-        inp.addEventListener("change", function () {
-          var berkas = inp.files && inp.files[0];
-          if (!berkas) return;
-          kecilkanGambar(berkas, 1000, function (data) {
-            FOTO_MODUL[kunci] = data; simpanFotoModul(); pasang(data);
+      var wadahTBF = E("div", "grup-tombol-foto");
+
+      var tbLink = E("button", "fd-unggah", "🔗 Tautan (Drive/URL)");
+      tbLink.type = "button";
+      tbLink.title = "Gunakan tautan Google Drive atau URL daring";
+      tbLink.addEventListener("click", function () {
+        var skrg = FOTO_MODUL[kunci] || "";
+        var baru = window.prompt("Masukkan tautan gambar (Link Google Drive atau URL daring):\nContoh: https://drive.google.com/file/d/xxx/view", skrg);
+        if (baru === null) return;
+        var tBaru = baru.trim();
+        if (tBaru) {
+          var urlGambar = ubahKeUrlGambar(tBaru);
+          FOTO_MODUL[kunci] = urlGambar;
+          simpanFotoModul(function (ok) {
+            if (ok) window.alert("Gambar berhasil disimpan secara online ke Supabase!");
           });
-        });
-        inp.click();
+          pasang(urlGambar);
+          if (tbReset) tbReset.style.display = "inline-block";
+        }
       });
-      kotak.appendChild(tb);
+      wadahTBF.appendChild(tbLink);
+
+      var tbReset = E("button", "fd-unggah", "↺ Reset");
+      tbReset.type = "button";
+      tbReset.title = "Hapus gambar ini";
+      tbReset.style.display = FOTO_MODUL[kunci] ? "inline-block" : "none";
+      tbReset.addEventListener("click", function () {
+        if (window.confirm("Hapus gambar ini?")) {
+          delete FOTO_MODUL[kunci];
+          simpanFotoModul();
+          pasang("");
+          tbReset.style.display = "none";
+        }
+      });
+      wadahTBF.appendChild(tbReset);
+
+      kotak.appendChild(wadahTBF);
     }
     wadah.appendChild(kotak);
     if (b.ket) wadah.appendChild(E("p", "fs-ket", b.ket));
@@ -4027,29 +4589,48 @@ const AKHIR = [
       if (f.kanan) kotak.appendChild(E("div", "fd-gelembung kanan", f.kanan));
 
       function pasang(data) {
-        if (data) { gbr.src = data; gbr.hidden = false; kosong.style.display = "none"; }
+        if (data) { pasangGambarAman(gbr, data); gbr.hidden = false; kosong.style.display = "none"; }
         else { gbr.hidden = true; kosong.style.display = ""; }
       }
       pasang(FOTO_MODUL[kunci]);
 
       if (ADMIN) {
-        var tb = E("button", "fd-unggah", "Unggah foto");
-        tb.type = "button";
-        tb.addEventListener("click", function () {
-          var inp = document.createElement("input");
-          inp.type = "file"; inp.accept = "image/*";
-          inp.addEventListener("change", function () {
-            var berkas = inp.files && inp.files[0];
-            if (!berkas) return;
-            kecilkanGambar(berkas, 900, function (data) {
-              FOTO_MODUL[kunci] = data;
-              simpanFotoModul();
-              pasang(data);
+        var wadahTBF = E("div", "grup-tombol-foto");
+
+        var tbLink = E("button", "fd-unggah", "🔗 Tautan (Drive/URL)");
+        tbLink.type = "button";
+        tbLink.title = "Gunakan tautan Google Drive atau URL daring";
+        tbLink.addEventListener("click", function () {
+          var skrg = FOTO_MODUL[kunci] || "";
+          var baru = window.prompt("Masukkan tautan foto percakapan (Google Drive atau URL):\nContoh: https://drive.google.com/file/d/xxx/view", skrg);
+          if (baru === null) return;
+          var tBaru = baru.trim();
+          if (tBaru) {
+            var urlGambar = ubahKeUrlGambar(tBaru);
+            FOTO_MODUL[kunci] = urlGambar;
+            simpanFotoModul(function (ok) {
+              if (ok) window.alert("Foto percakapan berhasil disimpan secara online ke Supabase!");
             });
-          });
-          inp.click();
+            pasang(urlGambar);
+            if (tbReset) tbReset.style.display = "inline-block";
+          }
         });
-        kotak.appendChild(tb);
+        wadahTBF.appendChild(tbLink);
+
+        var tbReset = E("button", "fd-unggah", "↺ Reset");
+        tbReset.type = "button";
+        tbReset.style.display = FOTO_MODUL[kunci] ? "inline-block" : "none";
+        tbReset.addEventListener("click", function () {
+          if (window.confirm("Hapus foto ini?")) {
+            delete FOTO_MODUL[kunci];
+            simpanFotoModul();
+            pasang("");
+            tbReset.style.display = "none";
+          }
+        });
+        wadahTBF.appendChild(tbReset);
+
+        kotak.appendChild(wadahTBF);
       }
       baris.appendChild(kotak);
     });
@@ -4067,15 +4648,106 @@ const AKHIR = [
     var isiK = E("div", "mars-isi");
     isiK.appendChild(E("h4", null, b.judul || "Mars Sumatera Barat"));
     if (b.ket) isiK.appendChild(E("p", null, b.ket));
-    var tb = E("button", "tuas-mars", "\u266a Putar tayangan");
+
+    var tb = E("button", "tuas-mars", "♪ Putar tayangan");
     tb.type = "button";
     tb.addEventListener("click", function () { bukaMars(); });
     isiK.appendChild(tb);
+
+    if (ADMIN) {
+      /* Tombol Unggah Mars */
+      var tbUnggah = E("button", "tbl-kecil", "📁 Unggah Mars (MP4)");
+      tbUnggah.type = "button";
+      tbUnggah.style.marginLeft = "8px";
+      tbUnggah.style.background = "#3E7C59";
+      tbUnggah.style.color = "#fff";
+      tbUnggah.style.fontWeight = "600";
+
+      var inpMars = document.createElement("input");
+      inpMars.type = "file";
+      inpMars.accept = "video/mp4,video/*";
+      inpMars.style.display = "none";
+
+      inpMars.addEventListener("change", function () {
+        var berkas = inpMars.files && inpMars.files[0];
+        if (!berkas) return;
+        if (berkas.size > 10 * 1024 * 1024) {
+          var objUrl = URL.createObjectURL(berkas);
+          if (videoMars) { videoMars.src = objUrl; marsSiap = false; }
+          window.alert("Ukuran video: " + (berkas.size / (1024 * 1024)).toFixed(1) + " MB.\n\n" +
+            "Video langsung aktif di perangkat ini. Untuk video berukuran besar, disarankan juga menaruh berkas di folder 'media/video/mars.mp4'.");
+          return;
+        }
+        var teksAwalMars = tbUnggah.textContent;
+        tbUnggah.disabled = true;
+        tbUnggah.textContent = "⏳ Menyimpan ke Supabase…";
+        var pembaca = new FileReader();
+        pembaca.onload = function () {
+          var dataUrl = pembaca.result;
+          MEDIA_KUSTOM["mars"] = dataUrl;
+          if (videoMars) { videoMars.src = dataUrl; marsSiap = false; }
+          simpanMediaKustom(function (ok, err) {
+            tbUnggah.disabled = false;
+            tbUnggah.textContent = teksAwalMars;
+            if (ok) {
+              window.alert("Video Mars MP4 berhasil disimpan ke Supabase!");
+            } else {
+              window.alert("Gagal menyimpan video Mars: " + (err || "error"));
+            }
+          });
+        };
+        pembaca.readAsDataURL(berkas);
+      });
+
+      tbUnggah.addEventListener("click", function () {
+        inpMars.click();
+      });
+      isiK.appendChild(tbUnggah);
+      isiK.appendChild(inpMars);
+
+      /* Tombol Tautan Mars */
+      var tbTautan = E("button", "tbl-kecil", "🔗 Ganti Mars (Drive / YouTube)");
+      tbTautan.type = "button";
+      tbTautan.style.marginLeft = "6px";
+      tbTautan.addEventListener("click", function () {
+        var skrg = (MEDIA_KUSTOM && MEDIA_KUSTOM["mars"]) || "";
+        var baru = window.prompt("Masukkan URL tautan video Mars (tautan YouTube, Google Drive, atau .mp4):", skrg);
+        if (baru === null) return;
+        var tBaru = baru.trim();
+        if (tBaru) {
+          MEDIA_KUSTOM["mars"] = tBaru;
+          simpanMediaKustom();
+          if (videoMars) { videoMars.src = tBaru; marsSiap = false; }
+          window.alert("Tautan video Mars berhasil disimpan ke Supabase!");
+        }
+      });
+      isiK.appendChild(tbTautan);
+
+      /* Tombol Reset Mars */
+      if (MEDIA_KUSTOM && MEDIA_KUSTOM["mars"]) {
+        var tbReset = E("button", "tbl-kecil", "↺ Bawaan");
+        tbReset.type = "button";
+        tbReset.style.marginLeft = "6px";
+        tbReset.addEventListener("click", function () {
+          if (window.confirm("Kembalikan video Mars ke video asli bawaan?")) {
+            delete MEDIA_KUSTOM["mars"];
+            simpanMediaKustom();
+            if (videoMars) { videoMars.src = MARS_SUMBAR; marsSiap = false; }
+            window.alert("Video Mars dikembalikan ke bawaan.");
+            tbReset.style.display = "none";
+          }
+        });
+        isiK.appendChild(tbReset);
+      }
+    }
+
     var cet = E("p", "cetak-saja", "Tayangan Mars Sumatera Barat tersedia pada versi digital modul ini.");
     isiK.appendChild(cet);
     k.appendChild(gb); k.appendChild(isiK);
     return k;
   }
+
+
 
   function buatPG(b, hal, kunciDasar) {
     var bungkus = E("div");
@@ -4089,10 +4761,13 @@ const AKHIR = [
       var umpan = E("div", "umpan");
       var tombolSemua = [];
       s.o.forEach(function (o, j) {
-        var t = E("button", null, '<span class="huruf">' + huruf[j] + '</span><span>' + o + "</span>");
-        t.type = "button";
-        t.addEventListener("click", function () {
-          tombolSemua.forEach(function (x) { x.disabled = true; });
+        var t = E("div", "pg-opsi-btn", '<span class="huruf">' + huruf[j] + '</span><span class="opsi-teks">' + o + "</span>");
+        t.setAttribute("role", "button");
+        t.setAttribute("tabindex", "0");
+        t.addEventListener("click", function (ev) {
+          if (modeSunting) return;
+          if (t.classList.contains("nonaktif")) return;
+          tombolSemua.forEach(function (x) { x.classList.add("nonaktif"); });
           var benar = (j === s.k);
           t.classList.add(benar ? "benar" : "salah");
           if (!benar) tombolSemua[s.k].classList.add("benar");
@@ -4102,12 +4777,18 @@ const AKHIR = [
           setNilai(hal, kunci, benar ? 1 : 0);
           simpan(); tandaiPoin(hal, kunci);
         });
+        t.addEventListener("keydown", function (ev) {
+          if ((ev.key === "Enter" || ev.key === " ") && !modeSunting) {
+            ev.preventDefault();
+            t.click();
+          }
+        });
         tombolSemua.push(t);
         pilihan.appendChild(t);
       });
       if (JAWAB[kunci]) {
         if (SKOR[kunci] === undefined) SKOR[kunci] = (JAWAB[kunci] === "benar") ? 1 : 0;
-        tombolSemua.forEach(function (x) { x.disabled = true; });
+        tombolSemua.forEach(function (x) { x.classList.add("nonaktif"); });
         tombolSemua[s.k].classList.add("benar");
         umpan.className = "umpan tampil ya";
         umpan.innerHTML = "<b>Sudah dijawab sebelumnya. </b>" + (s.e || "");
@@ -4125,14 +4806,18 @@ const AKHIR = [
     b.butir.forEach(function (s, i) {
       var kunci = kunciDasar + ".cl" + i;
       daftarPoin(hal, kunci); daftarNilai(hal, kunci);
-      var p = E("p");
+      var p = E("p", "cloze-baris");
       var bagian = s.t.split("{}");
-      p.appendChild(document.createTextNode((i + 1) + ". " + bagian[0]));
+      var sKiri = E("span", "cloze-teks", (i + 1) + ". " + bagian[0]);
+      p.appendChild(sKiri);
       var inp = document.createElement("input");
       inp.type = "text"; inp.setAttribute("aria-label", "isian nomor " + (i + 1));
       inp.value = JAWAB[kunci] || "";
       p.appendChild(inp);
-      if (bagian[1]) p.appendChild(document.createTextNode(bagian[1]));
+      if (bagian[1]) {
+        var sKanan = E("span", "cloze-teks", bagian[1]);
+        p.appendChild(sKanan);
+      }
       kotak.appendChild(p);
       isian.push({ inp: inp, k: s.k, kunci: kunci });
       inp.addEventListener("input", function () { JAWAB[kunci] = inp.value; simpan(); });
@@ -4183,11 +4868,15 @@ const AKHIR = [
     b.pasangan.forEach(function (p, i) {
       var kunci = kunciDasar + ".jd" + i;
       daftarPoin(hal, kunci); daftarNilai(hal, kunci);
-      var a = E("button", null, p[0]); a.type = "button"; a.dataset.pas = i; a.dataset.kunci = kunci;
+      var a = E("div", "jodoh-btn", '<span class="jodoh-teks">' + p[0] + '</span>');
+      a.setAttribute("role", "button"); a.setAttribute("tabindex", "0");
+      a.dataset.pas = i; a.dataset.kunci = kunci;
       kiri.appendChild(a);
     });
     acak(b.pasangan.map(function (p, i) { return { t: p[1], i: i }; })).forEach(function (o) {
-      var t = E("button", null, o.t); t.type = "button"; t.dataset.pas = o.i;
+      var t = E("div", "jodoh-btn", '<span class="jodoh-teks">' + o.t + '</span>');
+      t.setAttribute("role", "button"); t.setAttribute("tabindex", "0");
+      t.dataset.pas = o.i;
       kanan.appendChild(t);
     });
     function selesaiSatu(a, t) {
@@ -4199,12 +4888,14 @@ const AKHIR = [
       pesan.textContent = sisa ? ("Tinggal " + sisa + " pasangan lagi.") : "Semua pasangan tepat.";
     }
     kiri.addEventListener("click", function (ev) {
-      var t = ev.target.closest("button"); if (!t || t.disabled) return;
+      if (modeSunting) return;
+      var t = ev.target.closest(".jodoh-btn"); if (!t || t.classList.contains("cocok")) return;
       Array.prototype.forEach.call(kiri.children, function (x) { x.classList.remove("pilih"); });
       t.classList.add("pilih"); terpilih = t;
     });
     kanan.addEventListener("click", function (ev) {
-      var t = ev.target.closest("button"); if (!t || t.disabled) return;
+      if (modeSunting) return;
+      var t = ev.target.closest(".jodoh-btn"); if (!t || t.classList.contains("cocok")) return;
       if (!terpilih) { pesan.textContent = "Pilih dahulu kata di kolom kiri."; return; }
       if (t.dataset.pas === terpilih.dataset.pas) { selesaiSatu(terpilih, t); terpilih = null; }
       else {
@@ -4224,10 +4915,13 @@ const AKHIR = [
     var papan = E("div", "kartu-kata");
     b.entri.forEach(function (e) {
       var k = E("div", "kartu");
-      k.innerHTML = '<div class="dalam"><div class="sisi depan">' + e[0] +
-        "<small>klik untuk membalik</small></div>" +
-        '<div class="sisi belakang">' + e[1] + "</div></div>";
-      k.addEventListener("click", function () { k.classList.toggle("balik"); });
+      k.innerHTML = '<div class="dalam"><div class="sisi depan"><span class="kartu-teks">' + e[0] +
+        "</span><small>klik untuk membalik</small></div>" +
+        '<div class="sisi belakang"><span class="kartu-teks">' + e[1] + "</span></div></div>";
+      k.addEventListener("click", function () {
+        if (modeSunting) return;
+        k.classList.toggle("balik");
+      });
       papan.appendChild(k);
     });
     return papan;
@@ -4400,7 +5094,7 @@ const AKHIR = [
         JAWAB[kunci] = c.checked ? "ya" : ""; simpan();
         if (c.checked) tandaiPoin(hal, kunci); else { delete POIN[hal].selesai[kunci]; perbaruiLaju(); }
       });
-      baris.appendChild(c); baris.appendChild(E("span", null, t));
+      baris.appendChild(c); baris.appendChild(E("span", "cek-teks", t));
       kotak.appendChild(baris);
     });
     return kotak;
@@ -4424,8 +5118,11 @@ const AKHIR = [
         kosong.style.display = jawab.querySelectorAll(".keping").length ? "none" : "block";
       }
       acak(s.kata).forEach(function (k) {
-        var t = E("button", "keping", k); t.type = "button";
+        var t = E("div", "keping", '<span class="keping-teks">' + k + '</span>');
+        t.setAttribute("role", "button");
+        t.setAttribute("tabindex", "0");
         t.addEventListener("click", function () {
+          if (modeSunting) return;
           if (t.parentNode === bank) jawab.appendChild(t); else bank.appendChild(t);
           jawab.classList.remove("benar", "salah");
           segarkan();
@@ -4610,26 +5307,50 @@ const AKHIR = [
     kolomFoto.appendChild(gbrUnit); kolomFoto.appendChild(kosongUnit);
     (function () {
       function pasangUnit(data) {
-        if (data) { gbrUnit.src = data; gbrUnit.hidden = false; kosongUnit.style.display = "none"; }
+        if (data) { pasangGambarAman(gbrUnit, data); gbrUnit.hidden = false; kosongUnit.style.display = "none"; }
         else { gbrUnit.hidden = true; kosongUnit.style.display = ""; }
       }
       pasangUnit(FOTO_MODUL[kunciFotoUnit]);
+      daftarkanPemasangFoto(kunciFotoUnit, pasangUnit);
       if (ADMIN) {
-        var tbUnit = E("button", "fd-unggah", "Unggah gambar");
-        tbUnit.type = "button";
-        tbUnit.addEventListener("click", function () {
-          var inp = document.createElement("input");
-          inp.type = "file"; inp.accept = "image/*";
-          inp.addEventListener("change", function () {
-            var berkas = inp.files && inp.files[0];
-            if (!berkas) return;
-            kecilkanGambar(berkas, 900, function (data) {
-              FOTO_MODUL[kunciFotoUnit] = data; simpanFotoModul(); pasangUnit(data);
+        var wadahTBU = E("div", "grup-tombol-foto");
+        wadahTBU.style.position = "static";
+        wadahTBU.style.marginTop = "6px";
+
+        var tbUnitLink = E("button", "fd-unggah", "🔗 Tautan (Drive/URL)");
+        tbUnitLink.type = "button";
+        tbUnitLink.title = "Gunakan tautan Google Drive atau URL daring";
+        tbUnitLink.addEventListener("click", function () {
+          var skrg = FOTO_MODUL[kunciFotoUnit] || "";
+          var baru = window.prompt("Masukkan tautan gambar unit (Google Drive atau URL):\nContoh: https://drive.google.com/file/d/xxx/view", skrg);
+          if (baru === null) return;
+          var tBaru = baru.trim();
+          if (tBaru) {
+            var urlGambar = ubahKeUrlGambar(tBaru);
+            FOTO_MODUL[kunciFotoUnit] = urlGambar;
+            simpanFotoModul(function (ok) {
+              if (ok) window.alert("Gambar unit berhasil disimpan secara online ke Supabase!");
             });
-          });
-          inp.click();
+            pasangUnit(urlGambar);
+            if (tbResetU) tbResetU.style.display = "inline-block";
+          }
         });
-        kolomFoto.appendChild(tbUnit);
+        wadahTBU.appendChild(tbUnitLink);
+
+        var tbResetU = E("button", "fd-unggah", "↺ Reset");
+        tbResetU.type = "button";
+        tbResetU.style.display = FOTO_MODUL[kunciFotoUnit] ? "inline-block" : "none";
+        tbResetU.addEventListener("click", function () {
+          if (window.confirm("Hapus gambar unit ini?")) {
+            delete FOTO_MODUL[kunciFotoUnit];
+            simpanFotoModul();
+            pasangUnit("");
+            tbResetU.style.display = "none";
+          }
+        });
+        wadahTBU.appendChild(tbResetU);
+
+        kolomFoto.appendChild(wadahTBU);
       }
     })();
     kepala.appendChild(isiKepala);
@@ -4740,9 +5461,58 @@ const AKHIR = [
 
   /* ---------- identitas & sampul ---------- */
   var gambarSampul = document.getElementById("gambar-sampul");
-  gambarSampul.src = IDENTITAS.sampul || SAMPUL_BAWAAN;
+  gambarSampul.src = (FOTO_MODUL && FOTO_MODUL["sampul"]) || IDENTITAS.sampul || SAMPUL_BAWAAN;
   var latarSampul = document.getElementById("latar-sampul");
   if (latarSampul) latarSampul.src = gambarSampul.src;
+  daftarkanPemasangFoto("sampul", function (data) {
+    if (data && gambarSampul) {
+      pasangGambarAman(gambarSampul, data, SAMPUL_BAWAAN);
+      if (latarSampul) pasangGambarAman(latarSampul, data, SAMPUL_BAWAAN);
+    }
+  });
+  if (ADMIN) {
+    var wadahTBS = E("div", "wadah-tombol-sampul");
+    wadahTBS.style.marginTop = "8px";
+    wadahTBS.style.display = "flex";
+    wadahTBS.style.gap = "8px";
+
+    var tbSampulLink = E("button", "tbl-kecil", "🔗 Tautan Sampul (Drive/URL)");
+    tbSampulLink.type = "button";
+    tbSampulLink.style.cursor = "pointer";
+    tbSampulLink.addEventListener("click", function () {
+      var skrg = (FOTO_MODUL && FOTO_MODUL["sampul"]) || "";
+      var baru = window.prompt("Masukkan tautan foto sampul (Google Drive atau URL daring):\nContoh: https://drive.google.com/file/d/xxx/view", skrg);
+      if (baru === null) return;
+      var tBaru = baru.trim();
+      if (tBaru) {
+        var urlGambar = ubahKeUrlGambar(tBaru);
+        FOTO_MODUL["sampul"] = urlGambar;
+        simpanFotoModul(function (ok) {
+          if (ok) window.alert("Foto sampul berhasil diperbarui secara online ke Supabase!");
+        });
+        terapkanSemuaFoto();
+        if (tbResetSampul) tbResetSampul.style.display = "inline-block";
+      }
+    });
+    wadahTBS.appendChild(tbSampulLink);
+
+    var tbResetSampul = E("button", "tbl-kecil", "↺ Reset Sampul");
+    tbResetSampul.type = "button";
+    tbResetSampul.style.cursor = "pointer";
+    tbResetSampul.style.display = (FOTO_MODUL && FOTO_MODUL["sampul"]) ? "inline-block" : "none";
+    tbResetSampul.addEventListener("click", function () {
+      if (window.confirm("Kembalikan foto sampul ke bawaan?")) {
+        delete FOTO_MODUL["sampul"];
+        simpanFotoModul();
+        terapkanSemuaFoto();
+        tbResetSampul.style.display = "none";
+      }
+    });
+    wadahTBS.appendChild(tbResetSampul);
+
+    var heroPanel = document.querySelector(".hero");
+    if (heroPanel) heroPanel.appendChild(wadahTBS);
+  }
   var gambarRumah = document.getElementById("rumah-gadang");
   if (gambarRumah) gambarRumah.src = RUMAH_GADANG;
   var logoUnp = document.getElementById("logo-unp");
@@ -5281,6 +6051,9 @@ const AKHIR = [
       }
     });
   }
+  /* Ambil suntingan terkini dari Supabase agar semua pengguna melihat versi yang sama */
+  supabaseAmbilSuntingan();
+
   /* perangkat baru: bila belum ada jawaban tersimpan, kemajuan ditarik sendiri dari basis data */
   if (AKUN && URL_SINKRON && Object.keys(JAWAB).length === 0) {
     setTimeout(function () {
@@ -5716,15 +6489,25 @@ const AKHIR = [
   });
 
   /* ---------- mode sunting ---------- */
-  var PILIH_SUNTING = "#isi p, #isi li, #isi td, #isi th, #isi h2, #isi h3, #isi h4, " +
+  var PILIH_SUNTING = "#isi p:not(.cloze-baris), #isi li, #isi td, #isi th, #isi h2, #isi h3, #isi h4, " +
     "#isi .ucap, #isi .pelaku, #isi .penanda, #isi .perintah, #isi .judul-teks, " +
-    "#isi .sumber, #isi .jenis, #isi .tag, #isi .kegiatan-kop .judul, #isi .lencana b, #isi .lencana span";
+    "#isi .sumber, #isi .jenis, #isi .tag, #isi .kegiatan-kop .judul, #isi .kegiatan-kop .nomor, " +
+    "#isi .tujuan b, #isi .lencana b, #isi .lencana span, #isi .tanya, #isi .opsi-teks, " +
+    "#isi .cloze-teks, #isi .jodoh-teks, #isi .kartu-teks, #isi .keping-teks, #isi .cek-teks, " +
+    "#isi .lafal-teks, #isi .nomor-butir, #isi .fd-gelembung";
   var sasaranSunting = document.querySelectorAll(PILIH_SUNTING);
-  Array.prototype.forEach.call(sasaranSunting, function (el, i) {
-    if (el.closest("button") || el.closest("textarea") || el.closest(".umpan")) return;
-    var sid = "s" + i;
+  var idxSid = 0;
+  Array.prototype.forEach.call(sasaranSunting, function (el) {
+    /* Kecualikan tombol kontrol sistem, textarea, umpan, dan halaman pantauan/kelas */
+    if (el.closest("textarea") || el.closest(".umpan") ||
+        el.closest("#pantauan") || el.closest("#kelas")) return;
+    if (el.closest("button:not(.keping)")) return;
+    var sid = "s" + (idxSid++);
     el.dataset.sid = sid;
-    if (Object.prototype.hasOwnProperty.call(SUNTINGAN, sid)) el.innerHTML = SUNTINGAN[sid];
+    el.dataset.teksAsli = el.innerHTML;
+    if (Object.prototype.hasOwnProperty.call(SUNTINGAN, sid) && SUNTINGAN[sid] !== undefined && SUNTINGAN[sid] !== null) {
+      el.innerHTML = SUNTINGAN[sid];
+    }
   });
 
   var modeSunting = false;
@@ -5745,6 +6528,20 @@ const AKHIR = [
       if (nyala) { el.setAttribute("contenteditable", "true"); el.setAttribute("spellcheck", "false"); }
       else { el.removeAttribute("contenteditable"); el.removeAttribute("spellcheck"); }
     });
+    /* Bila admin menekan Selesai, langsung simpan segera ke Supabase tanpa menunggu sisa debounce */
+    if (!nyala && _timerSunting) {
+      clearTimeout(_timerSunting);
+      _timerSunting = null;
+      var muatan = {
+        id: "b1-modul",
+        data: SUNTINGAN,
+        diperbarui: new Date().toISOString(),
+        diperbarui_oleh: AKUN ? (AKUN.surel || AKUN.nama || "admin") : "admin"
+      };
+      supabaseReq("suntingan", "POST", muatan, function (ok, res, err) {
+        if (!ok) { console.warn("[MyBIPA] Gagal simpan suntingan ke Supabase:", err); }
+      });
+    }
   }
   btnSunting.addEventListener("click", function () { pasangSunting(!modeSunting); });
   isi.addEventListener("input", function (ev) {
@@ -5752,14 +6549,26 @@ const AKHIR = [
     var el = ev.target.closest ? ev.target.closest("[data-sid]") : null;
     if (!el) return;
     SUNTINGAN[el.dataset.sid] = el.innerHTML;
-    simpanSuntingan();
+    simpanSuntingan();           /* simpan ke cache lokal sebagai cadangan */
+    supabaseSimpanSuntingan();   /* sinkron ke Supabase secara global (debounce 1,5 dtk) */
   });
 
   document.getElementById("btn-asal").addEventListener("click", function () {
-    if (!window.confirm("Kembalikan seluruh teks modul ke bentuk aslinya? Suntingan Anda akan dihapus.")) return;
+    if (!window.confirm("Kembalikan seluruh isi modul (teks, foto, dan media) ke bentuk aslinya? Suntingan Anda akan dihapus.")) return;
     SUNTINGAN = {};
-    try { window.localStorage.removeItem(KUNCI_SUNTING); } catch (e) { }
-    window.location.reload();
+    FOTO_MODUL = {};
+    MEDIA_KUSTOM = {};
+    try {
+      window.localStorage.removeItem(KUNCI_SUNTING);
+      window.localStorage.removeItem(KUNCI_FOTO_MODUL);
+      window.localStorage.removeItem(KUNCI_MEDIA_KUSTOM);
+      window.localStorage.removeItem("mybipa-b1-minangkabau-sunting");
+      if (AKUN && AKUN.surel) window.localStorage.removeItem("mybipa-b1-minangkabau::" + AKUN.surel + "-sunting");
+    } catch (e) { }
+    /* Hapus juga dari Supabase agar semua pengguna kembali ke teks asli */
+    supabaseHapusSuntingan(function () {
+      window.location.reload();
+    });
   });
 
   /* ---------- unduh modul hasil suntingan ---------- */
@@ -5796,18 +6605,55 @@ const AKHIR = [
   var marsSiap = false;
 
   function bukaMars() {
-    if (!marsSiap) { videoMars.src = MARS_SUMBAR; videoMars.poster = MARS_POSTER; marsSiap = true; }
+    var sumberMars = (MEDIA_KUSTOM && MEDIA_KUSTOM["mars"]) || MARS_SUMBAR;
+    var embedMars = periksaVideoEmbed(sumberMars);
+    var wadahMars = videoMars ? videoMars.parentElement : null;
+    var ifrMars = wadahMars ? wadahMars.querySelector("iframe.mars-embed") : null;
+
+    if (embedMars) {
+      if (videoMars) {
+        videoMars.style.display = "none";
+        try { videoMars.pause(); } catch (e) { }
+      }
+      if (!ifrMars && wadahMars) {
+        ifrMars = document.createElement("iframe");
+        ifrMars.className = "mars-embed";
+        ifrMars.setAttribute("allowfullscreen", "");
+        ifrMars.setAttribute("allow", "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share");
+        wadahMars.insertBefore(ifrMars, videoMars);
+      }
+      if (ifrMars && ifrMars.src !== embedMars.src) ifrMars.src = embedMars.src;
+      if (ifrMars) ifrMars.style.display = "block";
+    } else {
+      if (ifrMars) {
+        ifrMars.src = "";
+        ifrMars.style.display = "none";
+      }
+      if (videoMars) {
+        videoMars.style.display = "block";
+        if (!marsSiap || videoMars.src !== sumberMars) {
+          videoMars.src = sumberMars; videoMars.poster = MARS_POSTER; marsSiap = true;
+        }
+        var main = videoMars.play();
+        if (main && main.catch) main.catch(function () { });
+      }
+    }
     tiraiMars.classList.add("buka");
     tiraiMars.setAttribute("aria-hidden", "false");
     document.body.style.overflow = "hidden";
-    var main = videoMars.play();
-    if (main && main.catch) main.catch(function () { });
   }
   function tutupMars() {
     tiraiMars.classList.remove("buka");
     tiraiMars.setAttribute("aria-hidden", "true");
     document.body.style.overflow = "";
-    try { videoMars.pause(); } catch (e) { }
+    try { if (videoMars) videoMars.pause(); } catch (e) { }
+    var wadahMars = videoMars ? videoMars.parentElement : null;
+    var ifrMars = wadahMars ? wadahMars.querySelector("iframe.mars-embed") : null;
+    if (ifrMars) {
+      var curr = ifrMars.src;
+      ifrMars.src = "";
+      ifrMars.src = curr;
+    }
   }
   document.getElementById("btn-mars").addEventListener("click", bukaMars);
   document.getElementById("tutup-mars").addEventListener("click", tutupMars);
